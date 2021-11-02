@@ -47,7 +47,7 @@ use crate::{
 ///
 /// pub fn detect(context: libcnb::GenericDetectContext) {};
 /// pub fn build(context: libcnb::GenericBuildContext) {};
-
+///
 /// let temp_dir = TempDir::new().unwrap();
 /// let dir = temp_dir.path();
 /// let mut builder = ContextBuilder::new("heroku-20")

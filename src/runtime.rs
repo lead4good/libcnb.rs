@@ -45,7 +45,7 @@ use std::fmt::{Debug, Display};
 /// ```
 pub fn cnb_runtime<P: Platform, BM: DeserializeOwned, E: Debug + Display>(
     detect_fn: impl Fn(DetectContext<P, BM>) -> Result<DetectOutcome, E>,
-    build_fn: impl Fn(BuildContext<P, BM>) -> Result<(), E>,
+    build_fn: Box<dyn Fn(Box<BuildContext<P, BM>>)> -> Result<(), E>,
     error_handler: impl ErrorHandler<E>,
 ) {
     match read_buildpack_toml::<BM, E>() {
