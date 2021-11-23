@@ -95,6 +95,12 @@ macro_rules! libcnb_newtype {
             }
         }
 
+        impl ::std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                &self.0[..]
+            }
+        }
+
         impl ::std::ops::Deref for $name {
             type Target = String;
 

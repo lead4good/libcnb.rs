@@ -81,14 +81,17 @@ pub struct License {
 struct StackUnchecked {
     pub id: String,
     #[serde(default)]
-    pub mixins: Vec<String>,
+    pub mixins: Vec<StackMixin>,
 }
 
 #[derive(Deserialize, Debug, Eq, PartialEq)]
 #[serde(try_from = "StackUnchecked")]
 pub enum Stack {
     Any,
-    Specific { id: StackId, mixins: Vec<String> },
+    Specific {
+        id: StackId,
+        mixins: Vec<StackMixin>,
+    },
 }
 
 impl TryFrom<StackUnchecked> for Stack {
@@ -268,16 +271,61 @@ libcnb_newtype!(
     r"^[[:alnum:]./-]+$"
 );
 
+libcnb_newtype!(
+    buildpack,
+    /// Construct a [`StackMixin`] value at compile time.
+    ///
+    /// Passing a string that is not a valid `StackMixin` value will yield a compilation error.
+    ///
+    /// # Examples:
+    /// ```
+    /// use libcnb_data::stack_mixin;
+    /// use libcnb_data::buildpack::StackMixin;
+    ///
+    /// let stack_mixin: StackMixin = stack_mixin!("jq");
+    /// ```
+    stack_mixin,
+    /// A mixin associated with a stack.
+    ///
+    /// A mixin name MUST only contain a `:` character as part of an optional `build:` or `run:` stage specifier prefix.
+    ///
+    /// Use the [`stack_mixin`](crate::stack_mixin) macro to construct a `StackMixin` from a
+    /// literal string. To parse a dynamic string into a `StackMixin`, use
+    /// [`str::parse`](str::parse).
+    ///
+    /// # Examples
+    /// ```
+    /// use libcnb_data::buildpack::StackMixin;
+    /// use libcnb_data::stack_mixin;
+    ///
+    /// let from_literal = stack_mixin!("jq");
+    ///
+    /// let input = "jq";
+    /// let from_dynamic: StackMixin = input.parse().unwrap();
+    /// assert_eq!(from_dynamic, from_literal);
+    ///
+    /// let input = "foo:jq";
+    /// let invalid: Result<StackMixin, _> = input.parse();
+    /// assert!(invalid.is_err());
+    /// ```
+    StackMixin,
+    StackMixinError,
+    r"^((build|run):)?[^:]+$"
+);
+
 #[derive(thiserror::Error, Debug)]
 pub enum BuildpackTomlError {
     #[error("Found `{0}` but value MUST be in the form `<major>.<minor>` or `<major>` and only contain numbers.")]
     InvalidBuildpackApi(String),
 
     #[error("Stack with id `*` MUST NOT contain mixins, however the following mixins were specified: `{}`", .0.join("`, `"))]
-    InvalidAnyStack(Vec<String>),
+    InvalidAnyStack(Vec<StackMixin>),
 
     #[error("Invalid Stack ID: {0}")]
     InvalidStackId(#[from] StackIdError),
+
+    #[error("Invalid Stack mixin: {0}")]
+    InvalidStackMixin(#[from] StackMixinError),
 
     #[error("Invalid Buildpack ID: {0}")]
     InvalidBuildpackId(#[from] BuildpackIdError),
@@ -463,7 +511,7 @@ id = "*"
                 },
                 Stack::Specific {
                     id: "io.buildpacks.stacks.focal".parse().unwrap(),
-                    mixins: vec![String::from("yj"), String::from("yq")]
+                    mixins: vec!["yj".parse().unwrap(), "yq".parse().unwrap()]
                 },
                 Stack::Any
             ]
@@ -488,6 +536,27 @@ id = "io.buildpacks.stacks.*"
         assert!(err
             .to_string()
             .contains("Invalid Stack ID: Invalid Value: io.buildpacks.stacks.*"));
+    }
+
+    #[test]
+    fn stacks_invalid_mixin_name() {
+        let raw = r#"
+api = "0.6"
+
+[buildpack]
+id = "foo/bar"
+name = "Bar Buildpack"
+version = "0.0.1"
+
+[[stacks]]
+id = "io.buildpacks.stacks.focal"
+mixins = ["foo:bar"]
+"#;
+
+        let err = toml::from_str::<GenericBuildpackToml>(raw).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Invalid Stack mixin: Invalid Value: foo:bar"));
     }
 
     #[test]
