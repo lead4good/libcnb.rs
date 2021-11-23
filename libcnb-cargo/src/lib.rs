@@ -19,9 +19,15 @@ pub enum Error {
     CrossCompileError(CrossCompileError),
 }
 
+enum Profile {
+    Dev,
+    Release,
+}
+
 pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
     // Currently, this is the only supported target triple
     let target_triple = "x86_64-unknown-linux-musl";
+    let cargo_profile = Profile::Dev;
 
     let buildpack_toml_path = project_path.as_ref().join("buildpack.toml");
     if !buildpack_toml_path.is_file() {
@@ -44,10 +50,14 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
         .root_package()
         .ok_or(Error::CouldNotFindBuildpackCargoPackage)?;
 
+    let mut cargo_args = vec!["build", "--target", target_triple];
+    match cargo_profile {
+        Profile::Dev => {}
+        Profile::Release => cargo_args.push("--release"),
+    }
+
     Command::new("cargo")
-        .arg("build")
-        .arg("--target")
-        .arg(&target_triple)
+        .args(cargo_args)
         .envs(cross_compile_env().map_err(Error::CrossCompileError)?)
         .spawn()
         .unwrap()
@@ -59,7 +69,10 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
     let buildpack_binary_path = cargo_metadata
         .target_directory
         .join(&target_triple)
-        .join("debug")
+        .join(match cargo_profile {
+            Profile::Dev => "debug",
+            Profile::Release => "release",
+        })
         .join(&target.name);
 
     let temporary_buildpack_dir = tempfile::tempdir().unwrap();
@@ -74,8 +87,12 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
     package_tarball(
         temporary_buildpack_dir.path(),
         &mut File::create(cargo_metadata.target_directory.join(format!(
-            "{}_buildpack.tar.gz",
-            buildpack_descriptor.buildpack.id
+            "{}_buildpack_{}.tar.gz",
+            buildpack_descriptor.buildpack.id,
+            match cargo_profile {
+                Profile::Dev => "dev",
+                Profile::Release => "release",
+            }
         )))
         .unwrap(),
     )
