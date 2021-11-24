@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use which::which;
 
 #[derive(Debug)]
@@ -17,9 +17,10 @@ pub enum Error {
     CargoMetadataError(cargo_metadata::Error),
     CouldNotFindBuildpackCargoPackage,
     CrossCompileError(CrossCompileError),
+    CargoBuildUnsuccessful(ExitStatus),
 }
 
-enum Profile {
+pub enum CargoProfile {
     Dev,
     Release,
 }
@@ -27,7 +28,25 @@ enum Profile {
 pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
     // Currently, this is the only supported target triple
     let target_triple = "x86_64-unknown-linux-musl";
-    let cargo_profile = Profile::Dev;
+    let cargo_profile = CargoProfile::Dev;
+
+    let mut cargo_args = vec!["build", "--target", target_triple];
+    match cargo_profile {
+        CargoProfile::Dev => {}
+        CargoProfile::Release => cargo_args.push("--release"),
+    }
+
+    let cargo_build_exit_status = Command::new("cargo")
+        .args(cargo_args)
+        .envs(cross_compile_env().map_err(Error::CrossCompileError)?)
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+
+    if !cargo_build_exit_status.success() {
+        return Err(Error::CargoBuildUnsuccessful(cargo_build_exit_status));
+    }
 
     let buildpack_toml_path = project_path.as_ref().join("buildpack.toml");
     if !buildpack_toml_path.is_file() {
@@ -50,28 +69,14 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
         .root_package()
         .ok_or(Error::CouldNotFindBuildpackCargoPackage)?;
 
-    let mut cargo_args = vec!["build", "--target", target_triple];
-    match cargo_profile {
-        Profile::Dev => {}
-        Profile::Release => cargo_args.push("--release"),
-    }
-
-    Command::new("cargo")
-        .args(cargo_args)
-        .envs(cross_compile_env().map_err(Error::CrossCompileError)?)
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
-
     let target = buildpack_cargo_package.targets.first().unwrap();
 
     let buildpack_binary_path = cargo_metadata
         .target_directory
         .join(&target_triple)
         .join(match cargo_profile {
-            Profile::Dev => "debug",
-            Profile::Release => "release",
+            CargoProfile::Dev => "debug",
+            CargoProfile::Release => "release",
         })
         .join(&target.name);
 
@@ -90,8 +95,8 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
             "{}_buildpack_{}.tar.gz",
             buildpack_descriptor.buildpack.id,
             match cargo_profile {
-                Profile::Dev => "dev",
-                Profile::Release => "release",
+                CargoProfile::Dev => "dev",
+                CargoProfile::Release => "release",
             }
         )))
         .unwrap(),
@@ -112,20 +117,23 @@ fn cross_compile_env() -> Result<Vec<(OsString, OsString)>, CrossCompileError> {
         let ld_binary_name = "x86_64-linux-musl-ld";
         let cc_binary_name = "x86_64-linux-musl-gcc";
 
-        let ld_path = which(ld_binary_name)
-            .map_err(|_| CrossCompileError::CouldNotFindLinkerBinary(String::from(ld_binary_name)))?
-            .into_os_string();
-
-        let cc_path = which(cc_binary_name)
-            .map_err(|_| CrossCompileError::CouldNotFindCCBinary(String::from(cc_binary_name)))?
-            .into_os_string();
-
         vec![
             (
                 OsString::from("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"),
-                ld_path,
+                which(ld_binary_name)
+                    .map_err(|_| {
+                        CrossCompileError::CouldNotFindLinkerBinary(String::from(ld_binary_name))
+                    })?
+                    .into_os_string(),
             ),
-            (OsString::from("CC_x86_64_unknown_linux_musl"), cc_path),
+            (
+                OsString::from("CC_x86_64_unknown_linux_musl"),
+                which(cc_binary_name)
+                    .map_err(|_| {
+                        CrossCompileError::CouldNotFindCCBinary(String::from(cc_binary_name))
+                    })?
+                    .into_os_string(),
+            ),
         ]
     } else {
         vec![]
