@@ -1,10 +1,10 @@
-use libcnb_cargo::read_project;
 use libcnb_cargo::Error;
+use libcnb_cargo::{package_buildpack, CargoProfile};
 
 fn main() {
     let current_dir = std::env::current_dir().unwrap();
 
-    read_project(&current_dir).unwrap();
+    package_buildpack(&current_dir, CargoProfile::Dev).unwrap();
 
     /*match read_project(&current_dir) {
         Ok(_) => {}

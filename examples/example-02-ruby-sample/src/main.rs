@@ -25,7 +25,7 @@ impl Buildpack for RubyBuildpack {
         let result = if context.app_dir.join("Gemfile.lock").exists() {
             DetectResultBuilder::pass().build()
         } else {
-            DetectReasultBuilder::fail().build()
+            DetectResultBuilder::fail().build()
         };
 
         Ok(result)

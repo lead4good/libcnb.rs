@@ -1,13 +1,16 @@
+mod cross_compile;
+
+use crate::Error::{MultipleCargoTargetsFound, NoCargoTargetsFound};
 use cargo_metadata::MetadataCommand;
+use cross_compile::CrossCompileError;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use libcnb_data::buildpack::BuildpackToml;
-use std::ffi::OsString;
 use std::fs;
-use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
-use which::which;
+use tar::{EntryType, Header};
 
 #[derive(Debug)]
 pub enum Error {
@@ -18,6 +21,10 @@ pub enum Error {
     CouldNotFindBuildpackCargoPackage,
     CrossCompileError(CrossCompileError),
     CargoBuildUnsuccessful(ExitStatus),
+    CargoBuildIoError(std::io::Error),
+    NoCargoTargetsFound,
+    MultipleCargoTargetsFound,
+    CouldNotWriteBuildpackArchive(std::io::Error),
 }
 
 pub enum CargoProfile {
@@ -25,10 +32,12 @@ pub enum CargoProfile {
     Release,
 }
 
-pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
+pub fn package_buildpack(
+    project_path: impl AsRef<Path>,
+    cargo_profile: CargoProfile,
+) -> Result<(), Error> {
     // Currently, this is the only supported target triple
     let target_triple = "x86_64-unknown-linux-musl";
-    let cargo_profile = CargoProfile::Dev;
 
     let mut cargo_args = vec!["build", "--target", target_triple];
     match cargo_profile {
@@ -38,11 +47,10 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
 
     let cargo_build_exit_status = Command::new("cargo")
         .args(cargo_args)
-        .envs(cross_compile_env().map_err(Error::CrossCompileError)?)
+        .envs(cross_compile::cross_compile_env(&target_triple).map_err(Error::CrossCompileError)?)
         .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
+        .and_then(|mut child| child.wait())
+        .map_err(Error::CargoBuildIoError)?;
 
     if !cargo_build_exit_status.success() {
         return Err(Error::CargoBuildUnsuccessful(cargo_build_exit_status));
@@ -69,7 +77,11 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
         .root_package()
         .ok_or(Error::CouldNotFindBuildpackCargoPackage)?;
 
-    let target = buildpack_cargo_package.targets.first().unwrap();
+    let target = match buildpack_cargo_package.targets.as_slice() {
+        [] => Err(NoCargoTargetsFound),
+        [single_target] => Ok(single_target),
+        _ => Err(MultipleCargoTargetsFound),
+    }?;
 
     let buildpack_binary_path = cargo_metadata
         .target_directory
@@ -80,94 +92,51 @@ pub fn read_project(project_path: impl AsRef<Path>) -> Result<(), Error> {
         })
         .join(&target.name);
 
-    let temporary_buildpack_dir = tempfile::tempdir().unwrap();
-
-    write_buildpack(
-        temporary_buildpack_dir.path(),
-        buildpack_toml_path,
-        buildpack_binary_path,
-    )
-    .unwrap();
-
-    package_tarball(
-        temporary_buildpack_dir.path(),
-        &mut File::create(cargo_metadata.target_directory.join(format!(
+    package_buildpack_tarball(
+        cargo_metadata.target_directory.join(format!(
             "{}_buildpack_{}.tar.gz",
-            buildpack_descriptor.buildpack.id,
+            buildpack_descriptor.buildpack.id.replace("/", "_"),
             match cargo_profile {
                 CargoProfile::Dev => "dev",
                 CargoProfile::Release => "release",
             }
-        )))
-        .unwrap(),
+        )),
+        &buildpack_toml_path,
+        &buildpack_binary_path,
     )
-    .unwrap();
-
-    Ok(())
+    .map_err(Error::CouldNotWriteBuildpackArchive)
 }
 
-#[derive(Debug)]
-pub enum CrossCompileError {
-    CouldNotFindLinkerBinary(String),
-    CouldNotFindCCBinary(String),
-}
-
-fn cross_compile_env() -> Result<Vec<(OsString, OsString)>, CrossCompileError> {
-    let env = if cfg!(target_os = "macos") {
-        let ld_binary_name = "x86_64-linux-musl-ld";
-        let cc_binary_name = "x86_64-linux-musl-gcc";
-
-        vec![
-            (
-                OsString::from("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"),
-                which(ld_binary_name)
-                    .map_err(|_| {
-                        CrossCompileError::CouldNotFindLinkerBinary(String::from(ld_binary_name))
-                    })?
-                    .into_os_string(),
-            ),
-            (
-                OsString::from("CC_x86_64_unknown_linux_musl"),
-                which(cc_binary_name)
-                    .map_err(|_| {
-                        CrossCompileError::CouldNotFindCCBinary(String::from(cc_binary_name))
-                    })?
-                    .into_os_string(),
-            ),
-        ]
-    } else {
-        vec![]
-    };
-
-    Ok(env)
-}
-
-fn write_buildpack(
-    target_dir_path: impl AsRef<Path>,
+fn package_buildpack_tarball(
+    destination_path: impl AsRef<Path>,
     buildpack_toml_path: impl AsRef<Path>,
     buildpack_binary_path: impl AsRef<Path>,
 ) -> std::io::Result<()> {
-    let bin_dir_path = target_dir_path.as_ref().join("bin");
-    let detect_path = bin_dir_path.join("detect");
-    let build_path = bin_dir_path.join("build");
+    let destination_file = fs::File::create(destination_path.as_ref())?;
+    let mut buildpack_toml_file = fs::File::open(buildpack_toml_path.as_ref())?;
+    let mut buildpack_binary_file = fs::File::open(buildpack_binary_path.as_ref())?;
 
-    fs::create_dir_all(&bin_dir_path)?;
+    let mut tar_builder =
+        tar::Builder::new(GzEncoder::new(destination_file, Compression::default()));
 
-    fs::copy(
-        &buildpack_toml_path,
-        target_dir_path.as_ref().join("buildpack.toml"),
-    )?;
+    tar_builder.append_file("buildpack.toml", &mut buildpack_toml_file)?;
+    tar_builder.append_file("bin/build", &mut buildpack_binary_file)?;
 
-    fs::copy(&buildpack_binary_path, &build_path)?;
-    std::os::unix::fs::symlink(&build_path, &detect_path).unwrap();
+    // Build a symlink header to link bin/detect to bin/build
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Symlink);
+    header.set_path("bin/detect")?;
+    header.set_link_name("build")?;
+    header.set_size(0);
+    header.set_mtime(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_secs(),
+    );
+    header.set_cksum();
 
-    Ok(())
-}
+    tar_builder.append(&header, &[][..])?;
 
-fn package_tarball(
-    directory: impl AsRef<Path>,
-    destination_file: &mut File,
-) -> std::io::Result<()> {
-    tar::Builder::new(GzEncoder::new(destination_file, Compression::default()))
-        .append_dir_all(".", directory.as_ref())
+    tar_builder.into_inner()?.finish()?.flush()
 }
